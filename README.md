@@ -14,28 +14,55 @@ az ad sp create-for-rbac --skip-assignment
 export APPID=<appId>
 export CLIENTSECRET=<password>
 export LOCATION=southeastasia
-export CLUSTERNAME=me-aks
-export RGNAME=me-aks-rg
+export CLUSTERNAME=lion-aks
+export RGNAME=rg-lion-aks
 
 az group create --name $RGNAME --location $LOCATION
 
-# Standard VM Type (unless changed) is : Standard_D2_v2
+### Standard VM Type (unless changed) is : Standard_D2_v2
 az aks create \
 --resource-group $RGNAME \
 --name $CLUSTERNAME \
---kubernetes-version 1.12.4 \
---service-principal $APPID \
---client-secret $CLIENTSECRET \
+--kubernetes-version 1.12.6 \
 --generate-ssh-keys
+--dns-name-prefix $CLUSTERNAME \
 --location $LOCATION \
+--enable rbac \
 --enable-vmss \
 --enable-cluster-autoscaler \
 --min-count 1 \
 --max-count 3 \
---enable-addons http_application_routing,monitoring
+--service-principal $APPID \
+--client-secret $CLIENTSECRET \
+--enable-addons http_application_routing,monitoring \
+--no-wait
+```
 
+# New AKS Cluster
+```
+az aks create --resource-group <RESOURCE_GP> --name <CLUSTER_NAME> --node-count 2 --generate-ssh-keys \
+--vnet-subnet-id <SUBNET_ID> --dns-name-prefix <DNS_PREFIX> --aad-server-app-id <AAD_SERVER_ID> --aad-server-app-secret <ADD_SECRET> \
+--aad-client-app-id <AAD_CLIENT_ID> --aad-tenant-id <TENANT_ID> --network-plugin azure --network-policy calico \
+--kubernetes-version 1.14.0
+```
+
+# Creating an AKS cluster with a custom "node resource group", where your AKS VM's etc will sit
+```
+# Example command:
+az aks create -l eastus --name CustomRG --node-resource-group HamBaconSwiss --resource-group coreDNS --generate-ssh-keys
+```
+
+### Troubleshooting the cluster-autoscaler
+```
+kubectl -n kube-system describe configmap cluster-autoscaler-status
+kubectl  logs coredns-autoscaler-6fcdb7d64-m6lcr -n kube-system
+Also, enable diagnostic logs
+```
+
+### Check the newly created cluster
+```
 az aks list -o table
-az aks get-credentials --resource-group $RGNAME --name $CLUSTERNAME
+az aks get-credentials --resource-group $RGNAME --name $CLUSTERNAME --admin
 ```
 
 ### Building an AKS cluster with-out node auto-scaling
@@ -43,7 +70,7 @@ az aks get-credentials --resource-group $RGNAME --name $CLUSTERNAME
 az aks create \
 --resource-group $RGNAME \
 --name $CLUSTERNAME \
---kubernetes-version 1.12.4 \
+--kubernetes-version 1.12.6 \
 --service-principal $APPID \
 --client-secret $CLIENTSECRET \
 --generate-ssh-keys \
@@ -66,6 +93,64 @@ az aks create --name aks-cluster \
 --vnet-subnet-id /subscriptions/{SUBSCRIPTION ID}/resourceGroups/{RESOURCE GROUP NAME}/providers/Microsoft.Network/virtualNetworks/{VIRTUAL NETWORK NAME}/subnets/{SUBNET NAME}
 
 # You can deploy AKS without RBAC, by using the flag "--rbac=false"
+```
+
+# Multple Node Pools
+* https://docs.microsoft.com/en-us/azure/aks/use-multiple-node-pools
+```
+az extension add --name aks-preview
+az feature register --name MultiAgentpoolPreview --namespace Microsoft.ContainerService
+az feature register --name VMSSPreview --namespace Microsoft.ContainerService
+az provider register --namespace Microsoft.ContainerService
+
+# Create a resource group in East US
+az group create --name myResourceGroup --location eastus
+
+# Create a basic single-node AKS cluster
+az aks create \
+    --resource-group myResourceGroup \
+    --name myAKSCluster \
+    --enable-vmss \
+    --node-count 1 \
+    --generate-ssh-keys \
+    --kubernetes-version 1.12.6
+
+# Add a node pool
+    az aks nodepool add \
+    --resource-group myResourceGroup \
+    --cluster-name myAKSCluster \
+    --name gpunodepool \
+    --node-count 1 \
+    --node-vm-size Standard_NC6 \
+    --no-wait
+
+# Set the taint on the nodepool
+kubectl taint node aks-gpunodepool-28993262-vmss000000 sku=gpu:NoSchedule
+
+# Upgrade a node pool
+az aks nodepool upgrade \
+    --resource-group myResourceGroup \
+    --cluster-name myAKSCluster \
+    --name mynodepool \
+    --kubernetes-version 1.12.7 \
+    --no-wait
+az aks nodepool list --resource-group myResourceGroup --cluster-name myAKSCluster -o table
+
+# Scale a node pool
+az aks nodepool scale \
+    --resource-group myResourceGroup \
+    --cluster-name myAKSCluster \
+    --name mynodepool \
+    --node-count 5 \
+    --no-wait
+
+# Delete a node pool
+az aks nodepool delete -g myResourceGroup --cluster-name myAKSCluster --name mynodepool --no-wait
+```
+
+### Troubleshooting an AKS deployment
+```
+aks create --debug ...
 ```
 
 ## Install kubectl
@@ -115,6 +200,7 @@ Download Azure CLI -> https://aka.ms/installazurecliwindows
 ```
 Run "Azure Command Prompt"
 az login
+az account set --subscription <subID>
 az aks install-cli --install-location c:\apps\kubectl.exe
 az aks get-credentials --name k8s-aks --resource-group k8s-aks-rg
 ```
@@ -233,18 +319,40 @@ $ helm install azure/azure-service-broker
 ```
 
 ### Give AKS permissions to pull images from ACR
+* 2 Methods
+** Grant AKS-generated Service Principal access to ACR (assumes use of AKS and ACR)
+** Create a Kubernetes Secret
+
+** Grant AKS-generated Service Principal access to ACR (assumes use of AKS and ACR)
 ```
-aksname=blah
-rgname=blahrg
-acrname=blahacr
-aks_client_id=$(az aks show --resource-group $rgname --name $aksname --query "servicePrincipalProfile.clientId" --output tsv)
-acr_app_id=$(az acr show --name $acrname --resource-group $rgname --query "id" --output tsv)
-az role assignment create --assignee $aks_client_id --role Reader --scope $acr_app_id
+AKS_RESOURCE_GROUP=myAKSResourceGroup
+AKS_CLUSTER_NAME=myAKSCluster
+ACR_RESOURCE_GROUP=myACRResourceGroup
+ACR_NAME=myACRRegistry
+
+# Get the id of the service principal configured for AKS
+CLIENT_ID=$(az aks show --resource-group $AKS_RESOURCE_GROUP --name $AKS_CLUSTER_NAME --query "servicePrincipalProfile.clientId" --output tsv)
+
+# Get the ACR registry resource id
+ACR_ID=$(az acr show --name $ACR_NAME --resource-group $ACR_RESOURCE_GROUP --query "id" --output tsv)
+
+# Create role assignment
+az role assignment create --assignee $CLIENT_ID --role acrpull --scope $ACR_ID
 ```
 
 ## Deploy Datadog helm chart for monitoring
 ```
 $ helm install --name dg-release --set datadog.apiKey=1234567890 --set rbac.create=false --set rbac.serviceAccount=false --set kube-state-metrics.rbac.create=false --set kube-state-metrics.rbac.serviceAccount=false stable/datadog
+```
+
+** Create a Kubernetes Secret
+```
+kubectl create secret docker-registry acr-auth --docker-server <acr-login-server> --docker-username <service-principal-ID> --docker-password <service-principal-password> --docker-email <email-address>
+
+spec:
+  imagePullSecrets:
+  - name: acr-auth
+  containers:
 ```
 
 ## Helm management
@@ -269,7 +377,21 @@ helm search chart
 # Kubernetes Reboot Daemon
 * https://docs.microsoft.com/en-us/azure/aks/node-updates-kured
 ```
-kubectl apply -f https://github.com/weaveworks/kured/releases/download/1.1.0/kured-1.1.0.yaml
+helm install stable/kured
+## Use helm above to deploy kured
+## kubectl apply -f https://github.com/weaveworks/kured/releases/download/1.1.0/kured-1.1.0.yaml
+```
+
+# AKS Node Pools
+```
+# View nodepool config:
+az aks nodepool list --cluster-name multiplenodepooldemo -g build2019-aks-demo -o table
+VirtualMachineScaleSets 1 30 nodepool1 1.13.5 100 Linux Sucessed build-demo Standard_DS2_v2
+VirtualMachineScaleSets 1 30 nodepoolgpu 1.13.5 100 Linux Sucessed build-demo Standard_NC6
+VirtualMachineScaleSets 1 30 npwin 1.13.5 100 Windows Sucessed build-demo Standard_D2s_v3
+
+# Scale VM's within a nodepool
+az aks nodepool scale --cluster-name multiplenodepooldemo -g build2019-aks-demo -n nodepoolgpu --node-count 2
 ```
 
 # spotify-docker-gc
@@ -435,6 +557,11 @@ spec:
     resource:
       name: memory
       targetAverageUtilization: 60
+```
+
+## HPA - Viewing config
+```
+kubectl get hpa.v2beta1.autoscaling -o yaml
 ```
 
 ## Rolling Updates
@@ -637,6 +764,11 @@ https://docs.microsoft.com/en-us/azure/dev-spaces/azure-dev-spaces
 $ azds space list
 $ azds space select -n lisa
 Hit F5
+```
+
+# Configuring RBAC for Azure DevOps Release Pipeline to deploy resource to AKS cluster - granting the read-only permission for group system:serviceaccounts
+```
+kubectl create clusterrolebinding azure-devops-deploy --clusterrole=view --group=system:serviceaccounts --namespace=xyz
 ```
 
 ## Kubernetes Cronjobs
@@ -1032,6 +1164,11 @@ hostname=aks-agentpool-20626790-0,kubernetes.io
 role=agent,storageprofile=managed,storagetier=Premium_LRS
 ```
 
+## Troubleshooting, ketall is useful to see cluster changes, useful if you have multiple admins or closed eyes
+```
+https://github.com/corneliusweig/ketall
+```
+
 ## Kubernetes Performance
 ```
 kubectl top pods --all-namespaces
@@ -1268,6 +1405,117 @@ kubectl get secrets cosmos-db-secret -o jsonpath --template '{.data.user}' | bas
 kubectl get service hellowhale-svc -o jsonpath='{.status.loadBalancer.ingress[*].ip}'
 11.66.100.244
 ```
+```
+kubectl logs my-pod --previous
+```
+```
+$ kubectl get pods
+NAME                     READY     STATUS    RESTARTS   AGE
+nginx-5947c4dd86-94q2x   1/1       Running   0          17d
+nginx-5947c4dd86-cm26m   1/1       Running   0          17d
+nginx-5947c4dd86-r5n5t   1/1       Running   0          17d
+
+$ kubectl exec nginx-5947c4dd86-94q2x -- printenv
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+HOSTNAME=nginx-5947c4dd86-94q2x
+KUBERNETES_PORT_443_TCP_ADDR=simon-aks-eng-aks-rg-123456-87654321.hcp.southeastasia.azmk8s.io
+KUBERNETES_PORT=tcp://simon-aks-eng-aks-rg-123456-87654321.hcp.southeastasia.azmk8s.io:443
+KUBERNETES_PORT_443_TCP=tcp://simon-aks-eng-aks-rg-123456-87654321.hcp.southeastasia.azmk8s.io:443
+KUBERNETES_SERVICE_HOST=simon-aks-eng-aks-rg-123456-87654321.hcp.southeastasia.azmk8s.io
+KUBERNETES_PORT_443_TCP_PORT=443
+NGINX_SVC_PORT=tcp://10.0.31.119:80
+NGINX_SVC_PORT_80_TCP_PORT=80
+NGINX_SVC_PORT_80_TCP_ADDR=10.0.31.119
+KUBERNETES_SERVICE_PORT_HTTPS=443
+NGINX_SVC_SERVICE_HOST=10.0.31.119
+NGINX_SVC_SERVICE_PORT=80
+NGINX_SVC_PORT_80_TCP=tcp://10.0.31.119:80
+NGINX_SVC_PORT_80_TCP_PROTO=tcp
+KUBERNETES_SERVICE_PORT=443
+KUBERNETES_PORT_443_TCP_PROTO=tcp
+NGINX_VERSION=1.15.8
+HOME=/root
+```
+```
+# Excellent command for debugging to better understand the environment
+kubectl describe nodes
+```
+```
+# Show component status
+$ kubectl get componentstatus
+NAME                 STATUS      MESSAGE                                                                                     ERROR
+scheduler            Unhealthy   Get http://127.0.0.1:10251/healthz: dial tcp 127.0.0.1:10251: connect: connection refused
+controller-manager   Unhealthy   Get http://127.0.0.1:10252/healthz: dial tcp 127.0.0.1:10252: connect: connection refused
+etcd-0               Healthy     {"health": "true"}
+```
+
+```
+# VPA
+kubectl describe vpa
+
+Show CPU Requests in millicores
+kubectl get pod  -o=custom-columns=NAME:.metadata.name,PHASE:.status.phase,CPU-REQUEST:.spec.containers\[0\].resources.requests.cpu
+
+$ kubectl top nodes
+NAME                       CPU(cores)   CPU%      MEMORY(bytes)   MEMORY%
+aks-nodepool1-71576875-0   114m         5%        2240Mi          42%
+
+The expression 0.1 is equivalent to the expression 100m, which can be read as “one hundred millicpu”, some people say “one hundred millicores”, which means the same thing.
+1 CPU is 1000m (1 thousand milicores)
+
+Meaning of CPU in Kubernetes :
+One CPU, in Kubernetes, is equivalent to:
+- 1 AWS vCPU
+- 1 GCP Core
+- 1 Azure vCore
+- 1 Hyperthread on a bare-metal Intel processor with Hyperthreading
+```
+
+# Howto determine if accelerated networking is enabled on the nodepool VM's
+```
+$ az aks show --resource-group <myRG> --name funkaks --query "nodeResourceGroup"
+"MC_funk-rg_funk_southeastasia"
+$ az network nic list --resource-group MC_funk-rg_funk_southeastasia -o table
+EnableAcceleratedNetworking    EnableIpForwarding    Location       MacAddress         Name                          Primary    ProvisioningState    ResourceGroup                        ResourceGuid
+-----------------------------  --------------------  -------------  -----------------  ----------------------------  ---------  -------------------  -----------------------------------  ------------------------------------
+True                           True                  southeastasia  00-0D-3A-99-99-99  aks-nodepool1-81576875-nic-0  True       Succeeded            MC_funk-rg_funk_southeastasia  111e2b48-059c-4c68-4444-aaaf97dadddd
+False                          False                 southeastasia  00-0D-3A-AA-AA-AA  jumpvmVMNic                   True       Succeeded            MC_funk-rg_funk_southeastasia  222293c5-e5c4-42b8-aaaa-95499bf4ffff
+```
+
+# Kubectl (client) and K8s (server) version
+```
+$ kubectl version --short
+Client Version: v1.11.1
+Server Version: v1.13.5
+```
+
+# Display OS and architecture of nodes
+```
+kubectl get node -o="custom-columns=NAME:.metadata.name,OS:.status.nodeInfo.operatingSystem,ARCH:.status.nodeInfo.architecture"
+NAME                       OS      ARCH
+aks-nodepool1-19880533-0   linux   amd64
+```
+
+# Listing the IPs of nodes in a windows nodepool
+```
+kubectl get no -l beta.kubernetes.io/os=windows -o json | jq '.items[].status.addresses[] | select(.type=="ExternalIP") | .address'
+```
+
+# Deploying tiller specifically onto a Linux VM, in a K8s cluster with both Linux/Windows nodes
+```
+helm init --node-selectors "beta.kubernetes.io/os=linux" --tiller-namespace wad --service-account wad-user --upgrade
+```
+
+# Using "kubectl apply dry-run with verbosity ..."
+```
+kubectl apply --dry-run -f ./deployment-nginx-acr-dockerhub.yaml --v=10 >& out
+```
+
+# Tricks when using istio...
+```
+INGRESS_PORT=$(kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.spec.ports[?(@.name=="http2")].nodePort}')
+SECURE_INGRESS_PORT=$(kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.spec.ports[?(@.name=="https")].nodePort}')
+```
 
 == Documentation / Further Info==
 
@@ -1328,3 +1576,7 @@ https://github.com/ramitsurana/awesome-kubernetes/blob/master/README.md
 
 AKS Roadmap
 https://azure.microsoft.com/en-us/updates/?status=indevelopment&product=kubernetes-service 
+
+K8s Deployment Types ie Canary, Blue/Green
+https://www.cncf.io/wp-content/uploads/2018/03/CNCF-Presentation-Template-K8s-Deployment.pdf
+https://github.com/ContainerSolutions/k8s-deployment-strategies
